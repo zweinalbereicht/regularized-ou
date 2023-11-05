@@ -1,0 +1,6 @@
+*/logs
+figures
+models
+*.ipynb
+scripts/__pycache__/*
+scripts/__pycache__

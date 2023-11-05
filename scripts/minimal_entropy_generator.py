@@ -49,7 +49,6 @@ class DrivingModel():
         self.driving_network=DrivingForce(self.inner_nodes,self.in_dim,self.out_dim).to(self.device)
 
         self.probability_flow=ProbabiltyFlow(self.driving_network,self.k)
-        self.true_probability_flow=TrueProbabiltyFlow(self.m1,self.sigma1,self.k)
         self.HeatGeneration=HeatGeneration(self.driving_network,self.k,self.sigma0,self.m0)
         self.optimizer=optim.Adam(self.driving_network.parameters(),lr=learning_rate)
 
@@ -88,33 +87,17 @@ class DrivingModel():
 
     # computes system entropy change associated to trained model
     def compute_system_entropy_change(self,samples):
-        _ ,_, logp_t0,logp_t = self.compute_log_prob(self,samples)
+        _ ,_, logp_t0,logp_t = self.compute_log_prob(samples)
         return  torch.mean(logp_t0 - logp_t[1])
 
     # compute KL divergence associated to trained model
     def kullback_leibler(self,samples):
-        _ ,z_t1, logp_t0,logp_t = self.compute_log_prob(self,samples)
-        p_z1 = torch.distributions.Normal(loc=torch.ones(1) * self.m1, scale=torch.ones(1) * self.sigma1)
-        logp_target = p_z1.log_prob(z_t1).to(self.device)
+        with torch.no_grad():
+            _ ,z_t1, logp_t0,logp_t = self.compute_log_prob(samples)
+            p_z1 = torch.distributions.Normal(loc=torch.ones(1) * self.m1, scale=torch.ones(1) * self.sigma1)
+            logp_target = p_z1.log_prob(z_t1).to(self.device)
         return  torch.mean(logp_t - logp_target)
 
-
-    # using the true score
-    def compute_true_system_entropy_change(self,samples):
-        p_z0 = torch.distributions.Normal(loc=torch.ones(1) * self.m0, scale=torch.ones(1) * self.sigma0)
-        z_t0 = p_z0.sample((samples,)).to(self.device)
-        logp_t0 = p_z0.log_prob(z_t0).to(self.device)
-            #integrate ODE from t0 to t1
-        _, logp_t = odeint(
-                self.true_probability_flow,
-                (z_t0, logp_t0),
-                torch.tensor([self.t0, self.t1]).type(torch.float32).to(self.device),
-                atol=1e-5,
-                rtol=1e-5,
-                method='dopri5',
-            )
-
-        return  torch.mean(logp_t0 - logp_t[1])
 
     def loss(self,epsilon):
         # loss associated to the diference with the score
@@ -145,77 +128,20 @@ class DrivingModel():
         # print('epoch',epoch,'loss',loss.item())
 
     def generate_trajectories(self,nb_samples,nb_steps):
-        ts = torch.linspace(0,1,nb_steps)
-        dts = torch.diff(ts)
+        with torch.no_grad():
+            ts = torch.linspace(0,1,nb_steps)
+            dts = torch.diff(ts)
 
-        # generate trajectories
-        positions=torch.randn(nb_samples,nb_steps) * self.sigma0 + self.m0
-        x0=positions[:,0].clone().unsqueeze(-1) #(dataset_size,1)
-        for i,t in enumerate(ts[1:]):
-            time = torch.ones_like(x0) * t
-            drift =  self.k * x0 + 2 * self.k * self.driving_network(x0,time)
-            noise = torch.randn_like(x0)
-            x0 = x0 + drift * dts[i] + noise * torch.sqrt(2 * self.k * torch.abs(dts[i]))
-            positions[:,i+1]=x0.squeeze()
-        return ts,positions
-
-    def generate_true_trajectories(self,nb_samples,nb_steps):
-        ts = torch.linspace(0,1,nb_steps)
-        dts = torch.diff(ts)
-
-        # generate trajectories
-        positions=torch.randn(nb_samples,nb_steps) * self.sigma0 + self.m0
-        x0=positions[:,0].clone().unsqueeze(-1) #(dataset_size,1)
-        for i,t in enumerate(ts[1:]):
-            time = torch.ones_like(x0) * t
-            mt=torch.exp(- self.k * (1-time)) * self.m1
-            vart = (- 1 + torch.exp( 2 * self.k * (1-time)) + self.sigma1 ** 2) * torch.exp(-2 * self.k * (1-time))
-            score = - ( x0 - mt ) / vart
-            drift =  self.k * x0 + 2 * self.k * score
-            noise = torch.randn_like(x0)
-            x0 = x0 + drift * dts[i] + noise * torch.sqrt(2 * self.k * torch.abs(dts[i]))
-            positions[:,i+1]=x0.squeeze()
-        return ts,positions
-
-    # via exact score driving
-    def compute_true_mean_heat(self,nb_samples,nb_dynamic_steps):
-        ts = torch.linspace(0,1,nb_dynamic_steps)
-        dts = torch.diff(ts)
-
-
-        # generate trajectories
-        positions=torch.randn(nb_samples,nb_dynamic_steps) * self.sigma0 + self.m0
-        x0=positions[:,0].clone().unsqueeze(-1) #(dataset_size,1)
-        for i,t in enumerate(ts[1:]):
-
-            time = torch.ones(nb_samples,1) * t
-            mt=torch.exp(- self.k * (1-time)) * self.m1
-            vart = (- 1 + torch.exp( 2 * self.k * (1-time)) + self.sigma1 ** 2) * torch.exp(-2 * self.k * (1-time))
-            score = - ( x0 - mt ) / vart
-            drift =  self.k * x0 + 2 * self.k * score
-            noise = torch.randn_like(x0)
-            x0 = x0 + drift * dts[i] + noise * torch.sqrt(2 * self.k * torch.abs(dts[i]))
-            positions[:,i+1]=x0.squeeze()
-
-
-        # compute infinitesimal heat along trajectories
-        position_increments = torch.diff(positions,dim=1) #(dataset_size,nbsteps-1)
-        midpoints = (positions[:,1:] + positions[:,:-1])/2 #(dataset_size,nbsteps-1)
-        delta_heat = torch.zeros_like(position_increments)
-        for i in range(len(delta_heat[0])):
-            time = torch.ones(nb_samples,1) * ts[i]
-            midpoint = midpoints[:,i].unsqueeze(-1)
-            mt=torch.exp(- self.k * (1-time)) * self.m1
-            vart = (- 1 + torch.exp( 2 * self.k * (1-time)) + self.sigma1 ** 2) * torch.exp(-2 * self.k * (1-time))
-            score = - ( midpoint - mt ) / vart
-            strato_force = - self.k * midpoint - 2 * self.k * score
-            delta_heat[:,i] =  position_increments[:,i] * strato_force.squeeze()
-        Q = torch.mean(torch.sum(delta_heat,1))
-        return Q
-
-    # via exact score driving from somewhere on the energetic geodesic
-    def compute_true_system_entropy_change_v2(self):
-        return np.log(self.sigma1 / self.sigma0)
+            # generate trajectories
+            positions=torch.randn(nb_samples,nb_steps) * self.sigma0 + self.m0
+            x0=positions[:,0].clone().unsqueeze(-1) #(dataset_size,1)
+            for i,t in enumerate(ts[1:]):
+                time = torch.ones_like(x0) * t
+                drift =  self.k * x0 + 2 * self.k * self.driving_network(x0,time)
+                noise = torch.randn_like(x0)
+                x0 = x0 + drift * dts[i] + noise * torch.sqrt(2 * self.k * torch.abs(dts[i]))
+                positions[:,i+1]=x0.squeeze()
+            return ts,positions
 
 class ProbabiltyFlow(nn.Module):
     def __init__(self, force_network : DrivingForce, k ):
@@ -233,28 +159,9 @@ class ProbabiltyFlow(nn.Module):
             dlogp_z_dt = -trace_df_dz(dz_dt, z).view(batchsize, 1)
         return (dz_dt, dlogp_z_dt)
 
-class TrueProbabiltyFlow(nn.Module):
-    def __init__(self, m,sigma, k ):
-        super().__init__()
-        self.m=m
-        self.sigma=sigma
-        self.k = k
 
-    def forward(self, t, states):
-        z = states[0]
-        # logp_z = states[1]
-        batchsize = z.shape[0]
-        with torch.set_grad_enabled(True):
-            z.requires_grad_(True)
-            #implement the ODE
-            mt=torch.exp(- self.k * (1-t)) * self.m
-            vart = (- 1 + torch.exp( 2 * self.k * (1-t)) + self.sigma ** 2) * torch.exp(-2 * self.k * (1-t))
-            score = - ( z - mt ) / vart
-            dz_dt = self.k * z + self.k * score
-            dlogp_z_dt = -trace_df_dz(dz_dt, z).view(batchsize, 1)
-        return (dz_dt, dlogp_z_dt)
-# computes the ODE term for the log likelihood
 
+# exact trace computation, coulf be sped up with the hutch estimator
 def trace_df_dz(f, z):
     sum_diag = 0.
     for i in range(z.shape[1]):
