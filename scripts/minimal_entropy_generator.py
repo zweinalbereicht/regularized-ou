@@ -93,9 +93,10 @@ class DrivingModel():
 
     # compute KL divergence associated to trained model
     def kullback_leibler(self,samples):
-        _ ,z_t1, logp_t0,logp_t = self.compute_log_prob(self,samples)
-        p_z1 = torch.distributions.Normal(loc=torch.ones(1) * self.m1, scale=torch.ones(1) * self.sigma1)
-        logp_target = p_z1.log_prob(z_t1).to(self.device)
+        with torch.no_grad():
+            _ ,z_t1, logp_t0,logp_t = self.compute_log_prob(self,samples)
+            p_z1 = torch.distributions.Normal(loc=torch.ones(1) * self.m1, scale=torch.ones(1) * self.sigma1)
+            logp_target = p_z1.log_prob(z_t1).to(self.device)
         return  torch.mean(logp_t - logp_target)
 
 

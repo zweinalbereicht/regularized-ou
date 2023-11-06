@@ -1,0 +1,6 @@
+figures
+models
+scripts/logs
+scripts/__pycache__
+slides
+*.ipynb
