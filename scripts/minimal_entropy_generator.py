@@ -33,7 +33,7 @@ class DrivingForce(nn.Module):
 # time 1 will always be the target
 # time 0 corresponds to the noise
 class DrivingModel():
-    def __init__(self,m1=10,sigma1=0.1,m0=0,sigma0=1,t0=0,t1=1,in_dim=2,inner_nodes=256,out_dim=1,k=1,device='cpu',learning_rate=1e-3):
+    def __init__(self,m1=10,sigma1=0.1,m0=0,sigma0=1,t0=0,t1=1,in_dim=2,inner_nodes=256,out_dim=1,k=1,device='cpu',learning_rate=1e-3,trace_function='exact'):
         self.t0=t0
         self.t1=t1
         self.in_dim=in_dim
@@ -45,10 +45,11 @@ class DrivingModel():
         self.sigma0=sigma0
         self.device=device
         self.k=k
+        self.trace_function=trace_function
 
         self.driving_network=DrivingForce(self.inner_nodes,self.in_dim,self.out_dim).to(self.device)
 
-        self.probability_flow=ProbabiltyFlow(self.driving_network,self.k)
+        self.probability_flow=ProbabiltyFlow(self.driving_network,self.k,self.trace_function)
         self.HeatGeneration=HeatGeneration(self.driving_network,self.k,self.sigma0,self.m0)
         self.optimizer=optim.Adam(self.driving_network.parameters(),lr=learning_rate)
 
@@ -93,10 +94,10 @@ class DrivingModel():
     # compute KL divergence associated to trained model
     def kullback_leibler(self,samples):
         with torch.no_grad():
-            _ ,z_t1, logp_t0,logp_t = self.compute_log_prob(samples)
+            _ , z_t1, _, logp_t = self.compute_log_prob(samples)
             p_z1 = torch.distributions.Normal(loc=torch.ones(1) * self.m1, scale=torch.ones(1) * self.sigma1)
-            logp_target = p_z1.log_prob(z_t1).to(self.device)
-        return  torch.mean(logp_t - logp_target)
+            logp_target = p_z1.log_prob(z_t1[1]).to(self.device)
+        return  torch.mean(logp_t[1] - logp_target)
 
 
     def loss(self,epsilon):
@@ -144,10 +145,14 @@ class DrivingModel():
             return ts,positions
 
 class ProbabiltyFlow(nn.Module):
-    def __init__(self, force_network : DrivingForce, k ):
+    def __init__(self, force_network : DrivingForce, k ,trace_function='exact'):
         super().__init__()
         self.force_network = force_network
         self.k = k
+        if trace_function=='exact':
+            self.trace_function = trace_df_dz
+        elif trace_function=='hutch':
+            self.trace_function = hutch_trace
 
     def forward(self, t, states):
         z = states[0]
@@ -156,7 +161,7 @@ class ProbabiltyFlow(nn.Module):
             z.requires_grad_(True)
             #implement the ODE
             dz_dt = self.k * z + self.k * self.force_network(z,torch.ones_like(z) * t)
-            dlogp_z_dt = -trace_df_dz(dz_dt, z).view(batchsize, 1)
+            dlogp_z_dt = - self.trace_function(dz_dt, z).view(batchsize, 1)
         return (dz_dt, dlogp_z_dt)
 
 
@@ -168,6 +173,28 @@ def trace_df_dz(f, z):
         sum_diag += torch.autograd.grad(f[:, i].sum(), z, create_graph=True)[0].contiguous()[:, i].contiguous()
     return sum_diag.contiguous()
 
+
+# approximate trace computation, using hutchinson estkimator. Should be faster -> this implementation is only for 1D systems
+# taken from Shriram's code
+# --> need to test if it working.
+def hutch_trace( y, x):
+        """Computres the trace of the Jacobian of y wrt x using Hutchinson's trace estimator.
+        Arguments:
+            y: A torch tensor of shape (batch_size, D)
+            x: A torch tensor of shape (batch_size, D)
+            e: A torch tensor of shape (batch_size, D) representing
+               epsilon to use for Hutchinson's trace estimator
+        Returns:
+            A torch tensor of shape (batch_size,) representing the trace of the Jacobian
+        """
+        e = torch.randn_like(x)
+        e_dydx = torch.autograd.grad(y, x,
+                                     grad_outputs=e, create_graph=True)[0]
+        approx_tr_dydx = (e_dydx * e).sum(-1)
+        return approx_tr_dydx
+
+
+
 class HeatGeneration(nn.Module):
     def __init__(self, force_network : DrivingForce,k,sigma0,m0):
         super().__init__()
@@ -176,7 +203,8 @@ class HeatGeneration(nn.Module):
         self.sigma0=sigma0
         self.m0=m0
 
-    #should we take the same trajectories as for the system entropy production? Probability at the level of means it does not matter
+    # Should we take the same trajectories as for the system entropy production? Probability at the level of means it does not matter
+    # Can be improved by doing only one loop.
     def compute_heat(self,nb_samples,nb_dynamic_steps):
         ts = torch.linspace(0,1,nb_dynamic_steps)
         dts = torch.diff(ts)

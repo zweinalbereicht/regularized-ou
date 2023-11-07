@@ -21,17 +21,18 @@ in_dim=2
 inner_nodes=256
 out_dim=1
 device='cpu'
-nb_epochs=10
-epsilon=0.8 # fraction of loss given to score loss
+nb_epochs=1000
+epsilon=1-1e-3 # fraction of loss given to score loss
 learning_rate=3e-4
+trace_function="exact"
 
 #define model
-model = DrivingModel(m1,sigma1,m0,sigma0,t0,t1,in_dim,inner_nodes,out_dim,k,device,learning_rate)
+model = DrivingModel(m1,sigma1,m0,sigma0,t0,t1,in_dim,inner_nodes,out_dim,k,device,learning_rate,trace_function=trace_function)
 
 #train and save model
 model.train(nb_epochs,epsilon=epsilon)
 network=model.driving_network
-# torch.save(network.state_dict(), '../models/rg_OU_eps_{epsilon}')
+torch.save(network.state_dict(), f'../models/rg_OU_eps_{epsilon}')
 
 # compute total entropy protdutcion
 # and KL divergence
